@@ -104,12 +104,17 @@ HERMES_ALWAYS_INLINE HERMES_OPTIMIZE inline int64_t now() {
 struct State {
     int64_t t0 = 0;
     int64_t time_elapsed = 0;
-    int64_t max_time = 1000 * 1000 * 500;
-    std::vector<int64_t> rec;
-    std::vector<int64_t> args;
+    int64_t max_time = 1000 * 1000 * 100;
+    int64_t *rec_beg = nullptr;
+    int64_t *rec_top = nullptr;
+    int64_t *rec_end = nullptr;
+    int64_t *args = nullptr;
+    size_t nargs = 0;
 
     int64_t arg(size_t i) const {
-        return args.at(i);
+        if (i > nargs)
+            return 0;
+        return args[i];
     }
 
     HERMES_ALWAYS_INLINE HERMES_OPTIMIZE State() = default;
@@ -136,7 +141,14 @@ struct State {
     HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void end(int64_t t) {
         int64_t dt = t - t0;
         time_elapsed += dt;
-        rec.push_back(dt);
+        if (rec_top == rec_end) {
+            size_t n = rec_top - rec_beg;
+            size_t cap = n * 2 + 48;
+            rec_beg = (int64_t *)realloc(rec_beg, cap * sizeof(int64_t));
+            rec_end = rec_beg + cap;
+            rec_top = rec_beg + n;
+        }
+        *rec_top++ = dt;
     }
 
     HERMES_ALWAYS_INLINE HERMES_OPTIMIZE bool next() {
@@ -162,7 +174,7 @@ enum class DeviationFilter {
 };
 
 struct Options {
-    DeviationFilter deviationFilter = DeviationFilter::MAD;
+    DeviationFilter deviationFilter = DeviationFilter::Sigma;
 #if __x86_64__ || _M_AMD64
 #if __GNUC__
     int64_t fixedOverhead = 44;
@@ -175,9 +187,31 @@ struct Options {
 };
 
 int register_entry(Entry ent);
-void run_entry(Entry const &ent, Options const &options = {});
-void report_state(const char *name, State &state, Options const &options = {});
-void run_all(Options const &options = {});
+
+struct Reporter {
+    struct Row {
+        int64_t med;
+        double avg;
+        double stddev;
+        int64_t min;
+        int64_t max;
+        int64_t count;
+    };
+
+    void run_entry(Entry const &ent, Options const &options = {});
+    void run_all(Options const &options = {});
+
+    virtual void report_state(const char *name, State &state, Options const &options = {});
+    virtual void write_report(const char *name, Row const &row) = 0;
+
+    virtual ~Reporter() = default;
+};
+
+Reporter *makeConsoleReporter();
+Reporter *makeCSVReporter(const char *path);
+Reporter *makeSVGReporter(const char *path);
+Reporter *makeNullReporter();
+Reporter *makeMultipleReporter(std::vector<Reporter *> const &reporters);
 
 void _do_not_optimize_impl(void *p);
 
@@ -196,5 +230,8 @@ static int _defbench_##name = ::hermes::register_entry({name, #name});
 extern "C" void name(::hermes::State &); \
 static int _defbench_##name = ::hermes::register_entry({name, #name, __VA_ARGS__}); \
 extern "C" HERMES_NOINLINE void name(::hermes::State &h)
+
+std::vector<int64_t> linear_range(int64_t begin, int64_t end, int64_t step = 1);
+std::vector<int64_t> log_range(int64_t begin, int64_t end, double factor = 2);
 
 }
