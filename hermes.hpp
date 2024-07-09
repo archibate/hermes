@@ -102,32 +102,53 @@ HERMES_ALWAYS_INLINE HERMES_OPTIMIZE inline int64_t now() {
 #endif
 }
 
+enum class DeviationFilter {
+    None,
+    Sigma,
+    MAD,
+};
+
+struct Options {
+    double max_time = 0.5;
+    DeviationFilter deviation_filter = DeviationFilter::MAD;
+};
+
 struct State {
+private:
+    friend struct Reporter;
+
     int64_t t0 = 0;
     int64_t time_elapsed = 0;
     int64_t max_time = 1;
     struct Chunk {
-        static const size_t kMaxPerChunk = 4096;
+        static const size_t kMaxPerChunk = 65536;
         size_t count = 0;
         Chunk *next = nullptr;
-        int64_t records[kMaxPerChunk];
+        int64_t records[kMaxPerChunk]{};
     };
-    Chunk rec_chunks;
-    Chunk *rec_chunks_tail = &rec_chunks;
-    int64_t *args = nullptr;
+    int64_t iteration_count = 0;
+    Chunk *rec_chunks = new Chunk();
+    Chunk *rec_chunks_tail = rec_chunks;
+    int64_t pause_t0 = 0;
+    int64_t const *args = nullptr;
     size_t nargs = 0;
+    int64_t items_processed = 0;
+    DeviationFilter deviation_filter = DeviationFilter::None;
 
-    int64_t arg(size_t i) const {
+public:
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE int64_t arg(size_t i) const {
         if (i > nargs)
             return 0;
         return args[i];
     }
 
-    State() = default;
+    State(Options const &options) {
+        set_max_time(options.max_time);
+        set_deviation_filter(options.deviation_filter);
+    }
 
     ~State() {
-        // free rec_chunks list
-        Chunk *current = rec_chunks.next;
+        Chunk *current = rec_chunks;
         while (current != nullptr) {
             Chunk *next = current->next;
             delete current;
@@ -138,22 +159,77 @@ struct State {
     State(State &&) = delete;
     State &operator=(State &&) = delete;
 
-    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void begin() {
+    struct iterator {
+    private:
+        State &state;
+        bool ok;
+
+    public:
+        HERMES_ALWAYS_INLINE HERMES_OPTIMIZE iterator(State &state_, bool ok_) : state(state_), ok(ok_) {
+            if (ok)
+                state.start();
+        }
+
+        HERMES_ALWAYS_INLINE HERMES_OPTIMIZE iterator &operator++() {
+            state.stop();
+            ok = state.next();
+            if (ok)
+                state.start();
+            return *this;
+        }
+
+        HERMES_ALWAYS_INLINE HERMES_OPTIMIZE iterator operator++(int) {
+            iterator tmp = *this;
+            ++*this;
+            return tmp;
+        }
+
+        HERMES_ALWAYS_INLINE HERMES_OPTIMIZE int operator*() const noexcept {
+            return 0;
+        }
+
+        HERMES_ALWAYS_INLINE HERMES_OPTIMIZE bool operator!=(iterator const &that) const noexcept {
+            return ok != that.ok;
+        }
+
+        HERMES_ALWAYS_INLINE HERMES_OPTIMIZE bool operator==(iterator const &that) const noexcept {
+            return ok == that.ok;
+        }
+    };
+
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE iterator begin() {
+        return iterator{*this, true};
+    }
+
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE iterator end() {
+        return iterator{*this, false};
+    }
+
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void start() {
         sfence();
         t0 = now();
         lfence();
     }
 
-    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void end() {
-        mfence();
-        end(now());
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void pause() {
+        pause_t0 = now();
     }
 
-    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void begin(int64_t t) {
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void resume() {
+        int64_t t1 = now();
+        t0 -= t1 - pause_t0;
+    }
+
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void stop() {
+        mfence();
+        stop(now());
+    }
+
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void start(int64_t t) {
         t0 = t;
     }
 
-    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void end(int64_t t) {
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void stop(int64_t t) {
         int64_t dt = t - t0;
         time_elapsed += dt;
         auto &chunk = *rec_chunks_tail;
@@ -163,6 +239,7 @@ struct State {
             rec_chunks_tail->next = new_node;
             rec_chunks_tail = new_node;
         }
+        ++iteration_count;
     }
 
     HERMES_ALWAYS_INLINE HERMES_OPTIMIZE bool next() {
@@ -173,6 +250,26 @@ struct State {
         return ok;
 #endif
     }
+
+    int64_t iterations() const noexcept {
+        return iteration_count;
+    }
+
+    int64_t times() const noexcept {
+        return time_elapsed;
+    }
+
+    void set_max_time(double t) {
+        max_time = (int64_t)(t * 1000000000);
+    }
+
+    void set_deviation_filter(DeviationFilter f) {
+        deviation_filter = f;
+    }
+
+    void set_items_processed(int64_t num) {
+        items_processed = num;
+    }
 };
 
 struct Entry {
@@ -181,42 +278,22 @@ struct Entry {
     std::vector<std::vector<int64_t>> args{};
 };
 
-enum class DeviationFilter {
-    None,
-    Sigma,
-    MAD,
-};
-
-struct Options {
-    double max_time = 0.5;
-    DeviationFilter deviationFilter = DeviationFilter::Sigma;
-#if __x86_64__ || _M_AMD64
-#if __GNUC__
-    int64_t fixedOverhead = 44;
-#else
-    int64_t fixedOverhead = 52;
-#endif
-#else
-    int64_t fixedOverhead = 0;
-#endif
-};
-
 int register_entry(Entry ent);
 
 struct Reporter {
     struct Row {
-        int64_t med;
+        double med;
         double avg;
         double stddev;
-        int64_t min;
-        int64_t max;
+        double min;
+        double max;
         int64_t count;
     };
 
     void run_entry(Entry const &ent, Options const &options = {});
     void run_all(Options const &options = {});
 
-    virtual void report_state(const char *name, State &state, Options const &options = {});
+    virtual void report_state(const char *name, State &state);
     virtual void write_report(const char *name, Row const &row) = 0;
 
     virtual ~Reporter() = default;

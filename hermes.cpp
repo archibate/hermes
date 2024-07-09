@@ -142,8 +142,7 @@ void Reporter::run_entry(Entry const &ent, Options const &options) {
         std::vector<size_t> indices(nargs, 0);
         bool done;
         do {
-            State state;
-            state.max_time = (int64_t)(1000'000'000 * options.max_time);
+            State state(options);
 
             std::vector<int64_t> args(nargs);
             state.args = args.data();
@@ -154,11 +153,21 @@ void Reporter::run_entry(Entry const &ent, Options const &options) {
                 int64_t value = ent.args[i][indices[i]];
                 args[i] = value;
                 new_name += '/';
-                new_name += std::to_string(value);
+                if (value == 0) {
+                    new_name += '0';
+                } else if (value % (1024 * 1024 * 1024) == 0) {
+                    new_name += std::to_string(value / (1024 * 1024 * 1024)) + 'G';
+                } else if (value % (1024 * 1024) == 0) {
+                    new_name += std::to_string(value / (1024 * 1024)) + 'M';
+                } else if (value % 1024 == 0) {
+                    new_name += std::to_string(value / 1024) + 'k';
+                } else {
+                    new_name += std::to_string(value);
+                }
             }
 
             ent.func(state);
-            report_state(new_name.c_str(), state, options);
+            report_state(new_name.c_str(), state);
 
             done = true;
             for (size_t i = 0; i < nargs; i++) {
@@ -174,15 +183,15 @@ void Reporter::run_entry(Entry const &ent, Options const &options) {
         } while (!done);
 
     } else {
-        State state;
-        state.max_time = (int64_t)(1000'000'000 * options.max_time);
+        State state(options);
+        state.max_time = (int64_t)(1000000000 * options.max_time);
 
         ent.func(state);
-        report_state(ent.name, state, options);
+        report_state(ent.name, state);
     }
 }
 
-void Reporter::report_state(const char *name, State &state, Options const &options) {
+void Reporter::report_state(const char *name, State &state) {
     int64_t count = 0;
     int64_t max = INT64_MIN;
     int64_t min = INT64_MAX;
@@ -190,7 +199,7 @@ void Reporter::report_state(const char *name, State &state, Options const &optio
     double square_sum = 0;
 
     std::vector<int64_t> records;
-    for (State::Chunk *chunk = &state.rec_chunks; chunk; chunk = chunk->next) {
+    for (State::Chunk *chunk = state.rec_chunks; chunk; chunk = chunk->next) {
         for (size_t i = 0; i < chunk->count; ++i) {
             records.push_back(chunk->records[i]);
         }
@@ -207,7 +216,7 @@ void Reporter::report_state(const char *name, State &state, Options const &optio
     double square_avg = square_sum / count;
     double stddev = std::sqrt(square_avg - avg * avg);
 
-    if (options.deviationFilter != DeviationFilter::None) {
+    if (state.deviation_filter != DeviationFilter::None) {
         sum = 0;
         square_sum = 0;
         count = 0;
@@ -217,7 +226,7 @@ void Reporter::report_state(const char *name, State &state, Options const &optio
         size_t nrecs = records.size();
         std::vector<bool> ok(nrecs);
 
-        switch (options.deviationFilter) {
+        switch (state.deviation_filter) {
         case DeviationFilter::None:
             break;
         case DeviationFilter::MAD:
@@ -262,14 +271,28 @@ void Reporter::report_state(const char *name, State &state, Options const &optio
         stddev = std::sqrt(square_avg - avg * avg);
     }
 
-    int64_t med = find_median(records.data(), records.size());
-    med -= options.fixedOverhead;
-    avg -= options.fixedOverhead;
-    min -= options.fixedOverhead;
-    max -= options.fixedOverhead;
+#if __x86_64__ || _M_AMD64
+#if __GNUC__
+    const int64_t kFixedOverhead = 44;
+#else
+    const int64_t kFixedOverhead = 52;
+#endif
+#else
+    const int64_t kFixedOverhead = 0;
+#endif
 
+    int64_t med = find_median(records.data(), records.size());
+    med -= kFixedOverhead;
+    avg -= kFixedOverhead;
+    min -= kFixedOverhead;
+    max -= kFixedOverhead;
+
+    double rate = state.items_processed ?
+        (double)state.iteration_count / state.items_processed
+        : 1.0;
     write_report(name, Reporter::Row{
-        med, avg, stddev, min, max, count,
+        med * rate, avg * rate, stddev * rate,
+        min * rate, max * rate, count,
     });
 }
 
@@ -308,15 +331,37 @@ std::vector<int64_t> log_range(int64_t begin, int64_t end, double factor) {
 
 namespace {
 
+int guess_prec(int max, double x, double mag = 10.0) {
+    int n = 0;
+    while (n < max - 2 && x < mag)
+        x *= 10, ++n;
+    return n;
+}
+
+const char *fit_order(double &x) {
+    if (x >= 1024 * 1024 * 1024) {
+        x /= 1024 * 1024 * 1024;
+        return "G";
+    } else if (x >= 1024 * 1024) {
+        x /= 1024 * 1024;
+        return "M";
+    } else if (x >= 1024) {
+        x /= 1024;
+        return "k";
+    } else {
+        return "";
+    }
+}
+
 struct ConsoleReporter : Reporter {
     ConsoleReporter() {
-        printf("%28s %10s %10s %6s %9s\n", "name", "med", "avg", "std", "n");
+        printf("%26s %11s %11s %6s %9s\n", "name", "med", "avg", "std", "n");
         printf("-------------------------------------------------------------------\n");
     }
 
     void write_report(const char *name, Reporter::Row const &row) override {
-        printf("%28s %10ld %10.0lf %6.0lf %9ld\n",
-               name, row.med, row.avg, row.stddev, row.count);
+        printf("%26s %11.*lf %11.*lf %6.*lf %9ld\n",
+               name, guess_prec(11, row.med), row.med, guess_prec(11, row.avg), row.avg, guess_prec(6, row.stddev), row.stddev, row.count);
     }
 };
 
@@ -337,7 +382,7 @@ struct CSVReporter : Reporter {
     }
 
     void write_report(const char *name, Reporter::Row const &row) override {
-        fprintf(fp, "%s,%lf,%lf,%ld,%ld,%ld\n",
+        fprintf(fp, "%s,%lf,%lf,%lf,%lf,%ld\n",
                name, row.avg, row.stddev, row.min, row.max, row.count);
     }
 };
@@ -350,6 +395,7 @@ struct SVGReporter : Reporter {
         double value;
         double height;
         double delta_up;
+        double delta_mid;
         double delta_down;
         double stddev_max;
         double stddev_min;
@@ -398,20 +444,21 @@ struct SVGReporter : Reporter {
                     "</style>\n");
         fprintf(fp, "<rect x=\"0\" y=\"0\" width=\"%lf\" height=\"%lf\" fill=\"lightgray\" />\n", w, h);
 
-        double xscale = (w - 200) / (bars.size() - 1);
+        double xscale = (w - 80) / (bars.size() + 1);
         double ymax = 0;
         for (size_t i = 0; i < bars.size(); i++) {
-            ymax = std::max(ymax, bars[i].height + bars[i].delta_up);
+            ymax = std::max(ymax, bars[i].height + std::min(bars[i].delta_up, bars[i].height));
         }
         double yscale = (h - 120) / ymax;
         for (size_t i = 0; i < bars.size(); i++) {
-            double x = 100 + i * xscale;
-            double y = h - 60;
             double bar_width = 0.65 * xscale;
+            double x = 40 + (i + 1) * xscale;
+            double y = h - 60;
             double bar_height = bars[i].height * yscale;
             double avg_width = 0.35 * xscale;
             double tip_width = 0.15 * xscale;
             double tip_height_up = bars[i].delta_up * yscale;
+            double tip_height_mid = bars[i].delta_mid * yscale;
             double tip_height_down = bars[i].delta_down * yscale;
             fprintf(fp, "<rect class=\"bar\" x=\"%lf\" y=\"%lf\" width=\"%lf\" height=\"%lf\" />\n",
                    x - bar_width * 0.5, y - bar_height, bar_width, bar_height);
@@ -423,9 +470,13 @@ struct SVGReporter : Reporter {
             fprintf(fp, "<line class=\"tip\" x1=\"%lf\" y1=\"%lf\" x2=\"%lf\" y2=\"%lf\" />\n",
                    x - tip_width * 0.5, y - bar_height - tip_height_up, x + tip_width * 0.5, y - bar_height - tip_height_up);
             fprintf(fp, "<line class=\"tip\" x1=\"%lf\" y1=\"%lf\" x2=\"%lf\" y2=\"%lf\" />\n",
+                   x - tip_width * 0.5, y - bar_height - tip_height_mid, x + tip_width * 0.5, y - bar_height - tip_height_mid);
+            fprintf(fp, "<line class=\"tip\" x1=\"%lf\" y1=\"%lf\" x2=\"%lf\" y2=\"%lf\" />\n",
                    x - tip_width * 0.5, y - bar_height - tip_height_down, x + tip_width * 0.5, y - bar_height - tip_height_down);
-            fprintf(fp, "<text class=\"value\" x=\"%lf\" y=\"%lf\">%.0lf</text>\n",
-                   x, y - bar_height - 20, bars[i].value);
+            double value = bars[i].value;
+            const char *order = fit_order(value);
+            fprintf(fp, "<text class=\"value\" x=\"%lf\" y=\"%lf\">%.*lf%s</text>\n",
+                   x, y - bar_height - 20, guess_prec(11, value), value, order);
             fprintf(fp, "<text class=\"label\" x=\"%lf\" y=\"%lf\">%s</text>\n",
                    x, h - 30, bars[i].name.c_str());
         }
@@ -435,20 +486,22 @@ struct SVGReporter : Reporter {
 
     void write_report(const char *name, Reporter::Row const &row) override {
         auto axis_scale = [] (double x) {
-            if (x <= 0)
+            if (x <= 1)
                 return x;
-            return std::log(x);
+            return std::log(x) + 1;
         };
         auto height = axis_scale(row.med);
         auto height_up = axis_scale(row.max);
+        auto height_mid = axis_scale(row.med);
         auto height_down = axis_scale(row.min);
         auto stddev_up = axis_scale(row.avg + row.stddev);
         auto stddev_down = axis_scale(row.avg - row.stddev);
         bars.push_back({
             name,
-            (double)row.med,
+            row.avg,
             height,
             height_up - height,
+            height_mid - height,
             height_down - height,
             stddev_up,
             stddev_down,
