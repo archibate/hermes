@@ -143,6 +143,8 @@ void Reporter::run_entry(Entry const &ent, Options const &options) {
         bool done;
         do {
             State state;
+            state.max_time = (int64_t)(1000'000'000 * options.max_time);
+
             std::vector<int64_t> args(nargs);
             state.args = args.data();
             state.nargs = nargs;
@@ -173,6 +175,8 @@ void Reporter::run_entry(Entry const &ent, Options const &options) {
 
     } else {
         State state;
+        state.max_time = (int64_t)(1000'000'000 * options.max_time);
+
         ent.func(state);
         report_state(ent.name, state, options);
     }
@@ -184,8 +188,14 @@ void Reporter::report_state(const char *name, State &state, Options const &optio
     int64_t min = INT64_MAX;
     double sum = 0;
     double square_sum = 0;
-    for (int64_t *rec = state.rec_beg; rec != state.rec_top; ++rec) {
-        int64_t x = *rec;
+
+    std::vector<int64_t> records;
+    for (State::Chunk *chunk = &state.rec_chunks; chunk; chunk = chunk->next) {
+        for (size_t i = 0; i < chunk->count; ++i) {
+            records.push_back(chunk->records[i]);
+        }
+    }
+    for (auto const &x: records) {
         sum += x;
         square_sum += x * x;
         max = std::max(x, max);
@@ -204,7 +214,7 @@ void Reporter::report_state(const char *name, State &state, Options const &optio
         max = INT64_MIN;
         min = INT64_MAX;
 
-        size_t nrecs = state.rec_top - state.rec_beg;
+        size_t nrecs = records.size();
         std::vector<bool> ok(nrecs);
 
         switch (options.deviationFilter) {
@@ -212,16 +222,16 @@ void Reporter::report_state(const char *name, State &state, Options const &optio
             break;
         case DeviationFilter::MAD:
             {
-                int64_t median = find_median(state.rec_beg, nrecs);
+                int64_t median = find_median(records.data(), records.size());
                 std::vector<int64_t> deviations(nrecs);
                 auto dev = deviations.data();
-                for (int64_t *rec = state.rec_beg; rec != state.rec_top; ++rec) {
-                    *dev++ = std::abs(*rec - median);
+                for (auto const &x: records) {
+                    *dev++ = std::abs(x - median);
                 }
                 int64_t mad = find_median(deviations.data(), deviations.size());
                 auto okit = ok.begin();
-                for (int64_t *rec = state.rec_beg; rec != state.rec_top; ++rec) {
-                    *okit++ = std::abs(*rec - median) <= 3 * mad;
+                for (auto const &x: records) {
+                    *okit++ = std::abs(x - median) <= 12 * mad;
                 }
             }
             break;
@@ -229,16 +239,15 @@ void Reporter::report_state(const char *name, State &state, Options const &optio
         case DeviationFilter::Sigma:
             {
                 auto okit = ok.begin();
-                for (int64_t *rec = state.rec_beg; rec != state.rec_top; ++rec) {
-                    *okit++ = std::abs(*rec - avg) <= 3 * stddev;
+                for (auto const &x: records) {
+                    *okit++ = std::abs(x - avg) <= 3 * stddev;
                 }
             }
             break;
         }
 
         auto okit = ok.begin();
-        for (int64_t *rec = state.rec_beg; rec != state.rec_top; ++rec) {
-            int64_t x = *rec;
+        for (auto const &x: records) {
             if (*okit++) {
                 sum += x;
                 square_sum += x * x;
@@ -253,7 +262,7 @@ void Reporter::report_state(const char *name, State &state, Options const &optio
         stddev = std::sqrt(square_avg - avg * avg);
     }
 
-    int64_t med = find_median(state.rec_beg, state.rec_top - state.rec_beg);
+    int64_t med = find_median(records.data(), records.size());
     med -= options.fixedOverhead;
     avg -= options.fixedOverhead;
     min -= options.fixedOverhead;

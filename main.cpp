@@ -2,7 +2,7 @@
 #include <cstring>
 #include <memory>
 
-BENCHMARK(BM_memcpy, {hermes::log_range(32, 65536, 2)}) {
+BENCHMARK(BM_memcpy, {hermes::log_range(32, 524288, 2)}) {
     size_t n = h.arg(0);
     char *dst = (char *)malloc(n);
     char *src = (char *)malloc(n);
@@ -21,7 +21,7 @@ BENCHMARK(BM_memcpy, {hermes::log_range(32, 65536, 2)}) {
 int main() {
     std::unique_ptr<hermes::Reporter> rep(hermes::makeMultipleReporter({
             hermes::makeConsoleReporter(),
-            hermes::makeSVGReporter("/tmp/out.svg"),
+            hermes::makeSVGReporter("bench.svg"),
     }));
     rep->run_all();
     return 0;

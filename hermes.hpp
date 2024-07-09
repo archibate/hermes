@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <list>
 #include <vector>
 #if __x86_64__ || __amd64__
 #include <x86intrin.h>
@@ -104,10 +105,15 @@ HERMES_ALWAYS_INLINE HERMES_OPTIMIZE inline int64_t now() {
 struct State {
     int64_t t0 = 0;
     int64_t time_elapsed = 0;
-    int64_t max_time = 1000 * 1000 * 100;
-    int64_t *rec_beg = nullptr;
-    int64_t *rec_top = nullptr;
-    int64_t *rec_end = nullptr;
+    int64_t max_time = 1;
+    struct Chunk {
+        static const size_t kMaxPerChunk = 4096;
+        size_t count = 0;
+        Chunk *next = nullptr;
+        int64_t records[kMaxPerChunk];
+    };
+    Chunk rec_chunks;
+    Chunk *rec_chunks_tail = &rec_chunks;
     int64_t *args = nullptr;
     size_t nargs = 0;
 
@@ -117,8 +123,17 @@ struct State {
         return args[i];
     }
 
-    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE State() = default;
-    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE ~State() = default;
+    State() = default;
+
+    ~State() {
+        // free rec_chunks list
+        Chunk *current = rec_chunks.next;
+        while (current != nullptr) {
+            Chunk *next = current->next;
+            delete current;
+            current = next;
+        }
+    }
 
     State(State &&) = delete;
     State &operator=(State &&) = delete;
@@ -141,14 +156,13 @@ struct State {
     HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void end(int64_t t) {
         int64_t dt = t - t0;
         time_elapsed += dt;
-        if (rec_top == rec_end) {
-            size_t n = rec_top - rec_beg;
-            size_t cap = n * 2 + 48;
-            rec_beg = (int64_t *)realloc(rec_beg, cap * sizeof(int64_t));
-            rec_end = rec_beg + cap;
-            rec_top = rec_beg + n;
+        auto &chunk = *rec_chunks_tail;
+        chunk.records[chunk.count++] = dt;
+        if (chunk.count == chunk.kMaxPerChunk) {
+            Chunk *new_node = new Chunk();
+            rec_chunks_tail->next = new_node;
+            rec_chunks_tail = new_node;
         }
-        *rec_top++ = dt;
     }
 
     HERMES_ALWAYS_INLINE HERMES_OPTIMIZE bool next() {
@@ -174,6 +188,7 @@ enum class DeviationFilter {
 };
 
 struct Options {
+    double max_time = 0.5;
     DeviationFilter deviationFilter = DeviationFilter::Sigma;
 #if __x86_64__ || _M_AMD64
 #if __GNUC__
