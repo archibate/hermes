@@ -132,12 +132,42 @@ static T find_median(T *begin, size_t n) {
 }
 
 void run_entry(Entry const &ent, Options const &options) {
-    static const size_t kChunkSize = 1024;
+    if (ent.args.size() != 0) {
+        auto nargs = ent.args.size();
+        std::vector<size_t> indices(nargs, 0);
+        bool done;
+        do {
+            State state;
+            state.args.resize(nargs);
+            std::string new_name = ent.name;
+            for (size_t i = 0; i < nargs; i++) {
+                int64_t value = ent.args[i][indices[i]];
+                state.args[i] = value;
+                new_name += '/';
+                new_name += std::to_string(value);
+            }
+            ent.func(state);
+            report_state(new_name.c_str(), state, options);
+            done = true;
+            for (size_t i = 0; i < nargs; i++) {
+                ++indices[i];
+                if (indices[i] >= ent.args[i].size()) {
+                    indices[i] = 0;
+                    continue;
+                } else {
+                    done = false;
+                    break;
+                }
+            }
+        } while (!done);
+    } else {
+        State state;
+        ent.func(state);
+        report_state(ent.name, state, options);
+    }
+}
 
-    State state;
-
-    ent.func(state);
-
+void report_state(const char *name, State &state, Options const &options) {
     int64_t count = 0;
     int64_t max = INT64_MIN;
     int64_t min = INT64_MAX;
@@ -208,7 +238,8 @@ void run_entry(Entry const &ent, Options const &options) {
     avg -= options.fixedOverhead;
     min -= options.fixedOverhead;
     max -= options.fixedOverhead;
-    printf("%20s %10.0lf %6.0lf %10ld %10ld %9ld\n", ent.name, avg, stddev, min, max, count);
+    printf("%20s %10.0lf %6.0lf %10ld %10ld %9ld\n",
+           name, avg, stddev, min, max, count);
 }
 
 void run_all(Options const &options) {

@@ -106,6 +106,11 @@ struct State {
     int64_t time_elapsed = 0;
     int64_t max_time = 1000 * 1000 * 500;
     std::vector<int64_t> rec;
+    std::vector<int64_t> args;
+
+    int64_t arg(size_t i) const {
+        return args.at(i);
+    }
 
     HERMES_ALWAYS_INLINE HERMES_OPTIMIZE State() = default;
     HERMES_ALWAYS_INLINE HERMES_OPTIMIZE ~State() = default;
@@ -124,7 +129,7 @@ struct State {
         end(now());
     }
 
-    HERMES_ALWAYS_INLINE void begin(int64_t t) {
+    HERMES_ALWAYS_INLINE HERMES_OPTIMIZE void begin(int64_t t) {
         t0 = t;
     }
 
@@ -147,6 +152,7 @@ struct State {
 struct Entry {
     void (*func)(State &);
     const char *name;
+    std::vector<std::vector<int64_t>> args{};
 };
 
 enum class DeviationFilter {
@@ -170,6 +176,7 @@ struct Options {
 
 int register_entry(Entry ent);
 void run_entry(Entry const &ent, Options const &options = {});
+void report_state(const char *name, State &state, Options const &options = {});
 void run_all(Options const &options = {});
 
 void _do_not_optimize_impl(void *p);
@@ -185,9 +192,9 @@ HERMES_OPTIMIZE void do_not_optimize(T &&t) {
 
 #define BENCHMARK_DEFINE(name) \
 static int _defbench_##name = ::hermes::register_entry({name, #name});
-#define BENCHMARK(name) \
+#define BENCHMARK(name, ...) \
 extern "C" void name(::hermes::State &); \
-static int _defbench_##name = ::hermes::register_entry({name, #name}); \
+static int _defbench_##name = ::hermes::register_entry({name, #name, __VA_ARGS__}); \
 extern "C" HERMES_NOINLINE void name(::hermes::State &h)
 
 }
