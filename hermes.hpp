@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <list>
 #include <vector>
 #if __x86_64__ || __amd64__
 #include <x86intrin.h>
